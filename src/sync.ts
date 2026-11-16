@@ -8,6 +8,22 @@ export class OutboxMessage extends Model {}
 export class StalePortalEditError extends Error { constructor(public readonly conflicts: string[]) { super(`stale portal fields: ${conflicts.join(", ")}`); this.name = "StalePortalEditError"; } }
 let portalSequence = 0;
 
+export class RateLimiter {
+  private readonly starts: number[] = [];
+  private readonly history: number[] = [];
+  constructor(private readonly requestsPerSecond: number) { if (requestsPerSecond <= 0) throw new Error("requestsPerSecond must be positive"); }
+  async acquire(): Promise<void> {
+    while (true) {
+      const now = Date.now();
+      while (this.starts[0] !== undefined && now - this.starts[0] >= 1000) this.starts.shift();
+      if (this.starts.length < this.requestsPerSecond) { this.starts.push(now); this.history.push(now); return; }
+      await new Promise((resolve) => setTimeout(resolve, 1000 - (now - this.starts[0])));
+    }
+  }
+  get requestStarts(): readonly number[] { return this.starts; }
+  get requestHistory(): readonly number[] { return this.history; }
+}
+
 export function createDatabase(storage: string): Sequelize {
   const db = new Sequelize({ dialect: "sqlite", storage, logging: false });
   FieldState.init({ recordId: { type: DataTypes.STRING, allowNull: false }, fieldName: { type: DataTypes.STRING, allowNull: false }, value: { type: DataTypes.STRING, allowNull: false }, version: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 }, source: { type: DataTypes.STRING, allowNull: false }, sourceSequence: { type: DataTypes.INTEGER, allowNull: false }, occurredAt: { type: DataTypes.INTEGER, allowNull: false }, actor: { type: DataTypes.STRING, allowNull: false }, correlationId: DataTypes.STRING }, { sequelize: db, modelName: "field_state", indexes: [{ unique: true, fields: ["recordId", "fieldName"] }] });
@@ -19,8 +35,10 @@ export function createDatabase(storage: string): Sequelize {
 
 export class FakeSalesforce {
   available = true; private sequence = 0;
-  constructor(private readonly onWebhook: (event: Event) => Promise<void>) {}
+  readonly limiter: RateLimiter;
+  constructor(private readonly onWebhook: (event: Event) => Promise<void>, requestsPerSecond = 100) { this.limiter = new RateLimiter(requestsPerSecond); }
   async update(recordId: string, fields: Fields, correlationId: string): Promise<void> {
+    await this.limiter.acquire();
     if (!this.available) throw new Error("Salesforce unavailable");
     this.sequence += 1;
     await this.onWebhook({ eventId: `sf-${this.sequence}`, recordId, occurredAt: this.sequence, actor: "salesforce-api", changedFields: fields, correlationId, sequence: this.sequence });
