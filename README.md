@@ -5,9 +5,10 @@ This optional demo is a small deterministic validation harness for [`docs/design
 ## Run from a fresh checkout
 
 ```text
-npm install
-npm test
-npm run demo
+pnpm install
+pnpm run typecheck
+pnpm test
+pnpm run demo
 ```
 
 The scenarios cover duplicate webhook delivery, an older webhook after a newer event, field-level portal conflict rejection and different-field merging, provenance-based loop prevention, and an outbox item surviving a database close/reopen while fake Salesforce is unavailable.
