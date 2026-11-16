@@ -47,14 +47,76 @@ If Salesforce cannot replay or query changes made while its webhooks were unavai
 ## 2. Systems, callers, network boundary, and interfaces
 
 ```mermaid
-flowchart LR
-  SF[Salesforce CRM\nSales users] -->|HTTPS webhook\nchanged-fields event| WH[Webhook endpoint]
-  WH --> IN[Inbound processor]
-  IN --> PG[(PostgreSQL / RDS)]
-  PORTAL[Tequity portal\nfinance and customer-success users] -->|transactional save| PG
-  PG --> OUT[Outbox worker]
-  OUT -->|HTTPS record API\ncreate/update| SF
-  SF -->|webhook echo or independent event| WH
+sequenceDiagram
+    autonumber
+
+    actor SalesUser as Salesforce Sales User
+    participant SF as Salesforce CRM
+    participant API as Webhook Endpoint
+    participant IN as Inbound Processor
+    participant DB as PostgreSQL / RDS
+    actor PortalUser as Portal User
+    participant OUT as Outbox Worker
+
+    rect rgba(255, 255, 255, 0)
+        Note over SalesUser,DB: FLOW 1 — Salesforce to Portal
+
+        SalesUser->>SF: <b>1.</b> Create or update customer/contact
+        SF->>API: <b>2.</b> HTTPS webhook with eventId and changed fields
+        API->>API: <b>3.</b> Authenticate and validate payload
+        API->>IN: <b>4.</b> Forward validated event
+        IN->>DB: <b>5.</b> Deduplicate and compare field version
+        IN->>DB: <b>6.</b> Update state and append audit history
+        DB-->>IN: <b>7.</b> Commit transaction
+        API-->>SF: <b>8.</b> HTTP 200 acknowledgement
+    end
+
+    rect rgba(255, 255, 255, 0)
+        Note over PortalUser,OUT: FLOW 2 — Portal to Salesforce
+
+        PortalUser->>DB: <b>1.</b> Edit customer/contact
+        DB->>DB: <b>2.</b> Validate optimistic field version
+        DB->>DB: <b>3.</b> Update state and audit history
+        DB->>DB: <b>4.</b> Create durable outbox message
+        DB-->>PortalUser: <b>5.</b> Commit successful
+
+        OUT->>DB: <b>6.</b> Claim pending outbox batch
+        OUT->>OUT: <b>7.</b> Apply configured rate limit
+        OUT->>SF: <b>8.</b> HTTPS create/update request
+        SF-->>OUT: <b>9.</b> Success or retryable failure
+        OUT->>DB: <b>10.</b> Mark delivered or schedule retry
+    end
+
+    rect rgba(255, 255, 255, 0)
+        Note over SF,IN: FLOW 3 — Salesforce Echo and Loop Prevention
+
+        SF->>API: <b>1.</b> Webhook echo for portal update
+        API->>IN: <b>2.</b> Validate and forward event
+        IN->>DB: <b>3.</b> Store event and audit result
+        IN->>DB: <b>4.</b> Detect correlation or provenance
+        IN->>DB: <b>5.</b> Apply state without creating another outbox message
+        API-->>SF: <b>6.</b> HTTP 200 acknowledgement
+    end
+
+    rect rgba(255, 255, 255, 0)
+        Note over PortalUser,SF: FLOW 4 — Six-Hour Salesforce Outage Recovery
+
+        PortalUser->>DB: <b>1.</b> Save portal edit
+        DB->>DB: <b>2.</b> Commit edit and durable outbox message
+        OUT->>SF: <b>3.</b> Attempt Salesforce API call
+        SF-->>OUT: <b>4.</b> Salesforce unavailable
+        OUT->>DB: <b>5.</b> Store retry state and next attempt time
+
+        Note over OUT,DB: Worker or process restarts
+
+        OUT->>DB: <b>6.</b> Reopen database and reload pending messages
+        OUT->>SF: <b>7.</b> Retry after Salesforce recovery
+        SF-->>OUT: <b>8.</b> Successful API response
+        OUT->>DB: <b>9.</b> Mark outbox message delivered
+
+        Note over OUT,SF: Backlog drains at the configured Salesforce rate limit
+        Note over SF,IN: Salesforce-side changes missed during the outage require replay or reconciliation
+    end
 ```
 
 The only network path between systems is HTTPS over the public internet. Users talk to their own application only: sales users use Salesforce; portal users use the portal.
